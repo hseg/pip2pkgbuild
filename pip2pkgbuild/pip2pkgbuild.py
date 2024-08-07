@@ -545,31 +545,28 @@ class Pkgbuild(object):
             statements='\n\n'.join(map(gen_statements, pylist))
         )
 
-    def generate(self):
+    def __steps(self):
+        """"
+        The parts of the PKGBUILD, as a generator
+
+        This allows avoiding repeated appends when constructing the PKGBUILD.
         """
-        :rtype: str
-        """
-        pkgbuild = []
 
         if self.name and self.email:
-            pkgbuild.append(MAINTAINER_LINE.format(
-                name=self.name, email=self.email
-                ))
+            yield MAINTAINER_LINE.format(name=self.name, email=self.email)
 
         pkg = self.module.source.split('/')[-1]
         src_folder = pkg.split(self.module.pkgver)[0] + self.module.pkgver
 
         if self.python == 'multi':
-            pkgbuild.append(SPLIT_NAME.format(
+            yield SPLIT_NAME.format(
                 pkgbase=self.pkgbase,
                 pkgname=iter_to_str(self.pkgname)
-                ))
+            )
         else:
-            pkgbuild.append(SINGLE_NAME.format(
-                pkgname=iter_to_str(self.pkgname)
-                ))
+            yield SINGLE_NAME.format(pkgname=iter_to_str(self.pkgname))
 
-        pkgbuild.append(HEADERS.format(
+        yield HEADERS.format(
             module=self.module.module,
             src_folder=src_folder,
             pkgver=self.module.pkgver,
@@ -580,7 +577,12 @@ class Pkgbuild(object):
             license=self.module.license,
             source=self.module.source,
             checksums=self.module.checksums
-        ))
+        )
+
+        if self.python == 'multi':
+            yield PREPARE_FUNC
+
+        yield self.__gen_build_func(self.python)
 
         install = INSTALL_STATEMENT if self.pep517 else INSTALL_STATEMENT_OLD
         if self.module.license_path:
@@ -591,8 +593,6 @@ class Pkgbuild(object):
             )
         else:
             license_command = ''
-
-        build_fun = self.__gen_build_func(self.python)
 
         if self.python == 'multi':
             def package_func(python, py_pkgname, depends, suffix):
@@ -607,33 +607,28 @@ class Pkgbuild(object):
                     ])
                 )
 
-            pkgbuild += [
-                PREPARE_FUNC,
-                build_fun,
-                package_func('python',
-                             self.py_pkgname,
-                             self.py3_depends,
-                             ''),
-                package_func('python2',
-                             self.py2_pkgname,
-                             self.py2_depends,
-                             '-python2')
-                ]
+            yield package_func('python',
+                               self.py_pkgname,
+                               self.py3_depends,
+                               '')
+            yield package_func('python2',
+                               self.py2_pkgname,
+                               self.py2_depends,
+                               '-python2')
         else:
-            pkgbuild += [
-                build_fun,
-                PACKAGE_FUNC.format(
-                    sub_pkgname='',
-                    dependencies='',
-                    suffix='',
-                    packaging_steps = join_nonempty([
-                        license_command.format(py_pkgname=self.pkgname[0]),
-                        install.format(python=self.python)
-                    ])
-                )
-            ]
+            yield PACKAGE_FUNC.format(
+                sub_pkgname='',
+                dependencies='',
+                suffix='',
+                packaging_steps = join_nonempty([
+                    license_command.format(py_pkgname=self.pkgname[0]),
+                    install.format(python=self.python)
+                ])
+            )
 
-        return '\n'.join(pkgbuild)
+    def generate(self):
+        """Generate the PKGBUILD functions from the various steps"""
+        return '\n'.join(self.__steps())
 
 
 def fetch_pymodule(name, version):
