@@ -241,7 +241,7 @@ class PyModule(object):
 
         The url should contain the source of the python module.
         :type url: str
-        :rtype: CompressedFacade|None
+        :rtype: Archive|None
         """
         if not url:
             LOG.warning('Given url was empty')
@@ -250,35 +250,35 @@ class PyModule(object):
         # Unfortunately, splitext only works for files
         # with single extensions
         filename = os.path.basename(url)
-        # Accept .tar.gz and .tar.gz files
-        tar_match = re.match('.*\\.tar\\.(?:gz|bz2)', filename, re.I)
-        zip_match = filename.lower().endswith('.zip')
-        if not tar_match and not zip_match:
-            LOG.warning("Source url('%s') "
-                        'did not have a zip or tar extension', url)
-            return None
-        try:
-            http_response = urlopen(url)
-        except HTTPError as e:
-            LOG.error('Could not retrieve python package for '
-                      'license inspection from %s with error %s', url, e)
-            return None
-        if tar_match:
+
+        def __get_archive():
+            try:
+                return urlopen(url)
+            except HTTPError as e:
+                LOG.error('Could not retrieve python package for '
+                          'license inspection from %s with error %s', url, e)
+                return None
+
+        # tar.gz and tar.bz
+        if re.match('.*\\.tar\\.(?:gz|bz2)', filename, re.I):
             # The mode needs to be 'r|*', (any type of tarball) which
             # tells tarfile that It should not attempt to
             # seek() or tell() the given
             # object since HTTPResponse doesn't support those operations
-            compressed_source = tarfile.open(fileobj=http_response, mode='r|*')
-        elif zip_match:
-            compressed_source = zipfile.ZipFile(BytesIO(http_response.read()))
-        compressed_facade = CompressedFacade(compressed_source)
-        return compressed_facade
+            return TarArchive(__get_archive())
+        # zip
+        elif filename.lower().endswith('.zip'):
+            return ZipArchive(__get_archive())
+        else:
+            LOG.warning("Source url('%s') "
+                        'did not have a zip or tar extension', url)
+            return None
 
     @staticmethod
     def __search_compressed_file(compressed_source, match):
         """Shallow depth first sarching in compressed file
 
-        :type compressed_source: CompressedFacade
+        :type compressed_source: Archive
         :type match: str -> T|None
         :rtype: T|None
         """
@@ -305,7 +305,7 @@ class PyModule(object):
     def __find_license_path(self, compressed_source):
         """Determine whether the package source contains a physical license.
 
-        :type compressed_source: CompressedFacade
+        :type compressed_source: Archive
         :rtype: bool|None
         """
         # LICENSE
@@ -386,22 +386,17 @@ class PyModule(object):
             info = urls[0]
         return info
 
-class CompressedFacade(object):
-    """Unify the `tarfile` and `zipfile` interface."""
-    ZIPFILE = 1
-    TARFILE = 2
+    def __get_source(self, url):
+        """
+        :type url: str
+        :rtype: str
+        """
+        ext = url.split(self.pkgver)[-1]
+        return '${_module}-${pkgver}' + ext + '::' + url
 
-    def __init__(self, obj):
-        """
-        :type obj: tarfile.TarFile | tarfile.ZipFile
-        """
-        self.obj = obj
-        if isinstance(obj, tarfile.TarFile):
-            self.compressed_type = CompressedFacade.TARFILE
-        elif isinstance(obj, zipfile.ZipFile):
-            self.compressed_type = CompressedFacade.ZIPFILE
-        else:
-            raise ValueError('Given object(%s) not a tar or zipfile', obj)
+
+class Archive(object):
+    """Interface for archive objects (like zip and tar files)"""
 
     def get_file_listing(self):
         """Return the files present inside of the archive.
@@ -411,13 +406,29 @@ class CompressedFacade(object):
 
         :rtype: list[str]
         """
-        if self.compressed_type == CompressedFacade.TARFILE:
-            return [tar_info.name for
-                    tar_info in self.obj.getmembers() if not tar_info.isdir()]
-        else:
-            # Remove directories from list
-            return [name for
-                    name in self.obj.namelist() if not name.endswith('/')]
+
+
+class TarArchive(Archive):
+    """Tar archive, providing access to its toplevel files"""
+
+    def __init__(self, file):
+        self.archive = tarfile.open(fileobj=file, mode='r|*')
+
+    def get_file_listing(self):
+        return [tar_info.name for
+                tar_info in self.archive.getmembers() if not tar_info.isdir()]
+
+
+class ZipArchive(Archive):
+    """Zip archive, providing access to all its files"""
+
+    def __init__(self, file):
+        self.file = zipfile.ZipFile(BytesIO(file.read()))
+
+    def get_file_listing(self):
+        # Remove directories from list
+        return [name for
+                name in self.file.namelist() if not name.endswith('/')]
 
 
 class Pkgbuild(object):
