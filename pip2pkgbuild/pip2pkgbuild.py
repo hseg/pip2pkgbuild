@@ -209,11 +209,10 @@ class PyModule(object):
     it.
     """
 
-    def __init__(self, json_data, find_license=False, pep517=False):
+    def __init__(self, json_data, find_license=False):
         """
         :type json_data: dict
         :type find_license: bool
-        :type pep517: bool
         """
         try:
             info = json_data['info']
@@ -228,7 +227,6 @@ class PyModule(object):
             self.checksums = dict_get(
                 src_info.get('digests', {}), 'sha256', '')
             self.license_path = None
-            self.pep517 = pep517
             if find_license:
                 compressed_source = self.__download_source(self.source)
                 self.license_path = self.__find_license_path(compressed_source)
@@ -500,7 +498,7 @@ class Pkgbuild(object):
 
     def __init__(self, module, meta,
                  mkdepends=None, backend=None, depends=None,
-                 pkgbase=None,
+                 pkgbase=None, pep517=False,
                  email=None, name=None):
         """
         :type module: PyModule
@@ -510,13 +508,14 @@ class Pkgbuild(object):
         :type backend: str
         :type depends: list[str]
         :type pkgbase: str
+        :type pep517: Bool
         :type name: str
         :type email: str
         """
         self.module = module
         self.name = name
         self.email = email
-        self.pep517 = module.pep517
+        self.pep517 = pep517
 
         self.splits = meta
         self.depends = []
@@ -794,8 +793,7 @@ def main(args=sys.argv):
 
     try:
         module = PyModule(fetch_pymodule(args.module, args.module_version),
-                          args.find_license,
-                          args.pep517)
+                          args.find_license)
     except PythonModuleNotFoundError as e:
         LOG.error('Python module not found: %s', e)
         sys.exit(0)
@@ -822,7 +820,6 @@ def main(args=sys.argv):
                'module_version',
                'print_out',
                'find_license',
-               'pep517',
                'python',
                'py2_depends',
                'py3_depends',
