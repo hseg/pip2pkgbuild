@@ -192,8 +192,8 @@ def removesuffix(s, suffix):
     return s
 # }}}
 
-# {{{ fetch_pymodule
-def fetch_pymodule(name, version):
+# {{{ fetch_pypi
+def fetch_pypi(name, version):
     """
     :type name: str
     :type version: str
@@ -802,7 +802,7 @@ def main(args=sys.argv):
                           'py3_depends', 'py2_depends']})
 
     try:
-        module = PyModule(fetch_pymodule(args.module, args.module_version),
+        module = PyModule(fetch_pypi(args.module, args.module_version),
                           args.find_license)
     except PythonModuleNotFoundError as e:
         LOG.error('Python module not found: %s', e)
