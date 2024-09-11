@@ -438,7 +438,7 @@ class SplitMeta(object):
     def __init__(self, pkgname=None, depends=None, suffix=''):
         self.pkgname = pkgname
         self.depends = depends if depends is not None else []
-        self.suffix  = suffix
+        self.suffix = suffix
 
     def update(self, pkgname=None, depends=None, suffix=None):
         """
@@ -450,7 +450,7 @@ class SplitMeta(object):
         """
         self.pkgname = pkgname if self.pkgname is None else self.pkgname
         self.depends += depends
-        self.suffix  = suffix  if self.suffix  is None else self.suffix
+        self.suffix = suffix if self.suffix is None else self.suffix
 
 
 def build_meta(python, pkgname, py2_pkgname, py3_depends, py2_depends):
@@ -464,15 +464,15 @@ def build_meta(python, pkgname, py2_pkgname, py3_depends, py2_depends):
     meta = {}
     if python in {'python', 'multi'}:
         meta['python'] = SplitMeta(
-            pkgname = pkgname,
-            depends = py3_depends,
-            suffix  = ''
+            pkgname=pkgname,
+            depends=py3_depends,
+            suffix=''
         )
     if python in {'python2', 'multi'}:
         meta['python2'] = SplitMeta(
-            pkgname = py2_pkgname,
-            depends = py2_depends,
-            suffix  = '-python2' if python == 'multi' else ''
+            pkgname=py2_pkgname,
+            depends=py2_depends,
+            suffix='-python2' if python == 'multi' else ''
         )
 
     if (any(v is not None for v in [pkgname, py3_depends]) and
@@ -525,8 +525,8 @@ class Pkgbuild(object):
         if self.is_split:
             for py in self.splits:
                 self.splits[py].update(
-                    pkgname = '%s-%s' % (py, module.name),
-                    depends = [py])
+                    pkgname='%s-%s' % (py, module.name),
+                    depends=[py])
         else:
             self.depends += self.python_vers
 
@@ -631,7 +631,7 @@ class Pkgbuild(object):
                 sub_pkgname=('_'+meta.pkgname) if self.is_split else '',
                 dependencies=SUBPKG_DEPENDS.format(
                     depends=iter_to_str(meta.depends)) if meta.depends != []
-                    else '',
+                else '',
                 suffix=meta.suffix,
                 packaging_steps=join_nonempty([
                     license_command.format(py_pkgname=meta.pkgname),
