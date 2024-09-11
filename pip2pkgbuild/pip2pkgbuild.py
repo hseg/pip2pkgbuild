@@ -489,6 +489,9 @@ def build_meta(python, pkgname, py2_pkgname, py3_depends, py2_depends):
     return meta
 
 
+Maintainer = namedtuple('Maintainer', ['name', 'email'])
+Maintainer.__doc__ = """Representation of maintainer metadata"""
+
 class Pkgbuild(object):
     """
     Representation of a PKGBUILD
@@ -496,25 +499,22 @@ class Pkgbuild(object):
     Encapsulates the metadata-to-PKGBUILD logic
     """
 
-    def __init__(self, module, meta,
+    def __init__(self, module, meta, maintainer=None,
                  mkdepends=None, backend=None, depends=None,
-                 pkgbase=None, pep517=False,
-                 email=None, name=None):
+                 pkgbase=None, pep517=False):
         """
         :type module: PyModule
         :type python: str
         :type meta: dict[str, SplitMeta]
+        :type maintainer: Maintainer
         :type mkdepends: list[str]
         :type backend: str
         :type depends: list[str]
         :type pkgbase: str
         :type pep517: Bool
-        :type name: str
-        :type email: str
         """
         self.module = module
-        self.name = name
-        self.email = email
+        self.maintainer = maintainer
         self.pep517 = pep517
 
         self.splits = meta
@@ -578,8 +578,8 @@ class Pkgbuild(object):
         This allows avoiding repeated appends when constructing the PKGBUILD.
         """
 
-        if self.name and self.email:
-            yield MAINTAINER_LINE.format(name=self.name, email=self.email)
+        if self.maintainer is not None:
+            yield MAINTAINER_LINE.format(**self.maintainer._asdict())
 
         pkg = self.module.source.split('/')[-1]
         src_folder = pkg.split(self.module.pkgver)[0] + self.module.pkgver
@@ -826,7 +826,8 @@ def main(args=sys.argv):
                'py2_pkgname',
                'pkgname'])
 
-    pkgbuild = Pkgbuild(module, meta, **opts).generate()
+    maintainer = Maintainer(args.email, args.name)
+    pkgbuild = Pkgbuild(module, meta, maintainer, **opts).generate()
 
     if args.print_out:
         sys.stdout.write(pkgbuild)
