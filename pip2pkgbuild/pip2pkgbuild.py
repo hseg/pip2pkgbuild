@@ -39,6 +39,7 @@ logging.basicConfig(
 )
 LOG = logging.getLogger('log')
 
+# {{{ Template strings
 MODULE_JSON = 'https://pypi.python.org/pypi/{name}/json'
 VERSION_MODULE_JSON = 'https://pypi.python.org/pypi/{name}/{version}/json'
 
@@ -110,8 +111,10 @@ package{sub_pkgname}() {{{dependencies}
 {packaging_steps}
 }}
 """
+# }}}
 
 
+# {{{ Utils
 def known_licenses():
     """
     :rtype: list[str]
@@ -187,6 +190,33 @@ def removesuffix(s, suffix):
     if s.endswith(suffix):
         return s[:-len(suffix)]
     return s
+# }}}
+
+# {{{ fetch_pymodule
+def fetch_pymodule(name, version):
+    """
+    :type name: str
+    :type version: str
+    :rtype: dict
+    """
+    def fetch_json(url):
+        return json.loads(urlopen(url).read().decode('utf-8'))
+
+    try:
+        url = MODULE_JSON.format(name=name)
+        info = fetch_json(url)
+        if version:
+            if info['releases'].get(version) is None:
+                raise PythonModuleVersionNotFoundError(
+                    '{} {}'.format(name, version))
+            url = VERSION_MODULE_JSON.format(name=name, version=version)
+            info = fetch_json(url)
+
+    except HTTPError as e:
+        if e.code == 404:
+            raise PythonModuleNotFoundError('{}'.format(name))
+        raise e
+    return info
 
 
 class PythonModuleNotFoundError(Exception):
@@ -195,12 +225,9 @@ class PythonModuleNotFoundError(Exception):
 
 class PythonModuleVersionNotFoundError(Exception):
     """Thrown when the specified module version can't be found on PyPI"""
+# }}}
 
-
-class ParseModuleInfoError(Exception):
-    """Thrown when the PyPI response is malformed"""
-
-
+# {{{ PyModule
 class PyModule(object):
     """
     Metadata for a python module
@@ -428,7 +455,11 @@ class ZipArchive(Archive):
         return [name for
                 name in self.file.namelist() if not name.endswith('/')]
 
+class ParseModuleInfoError(Exception):
+    """Thrown when the PyPI response is malformed"""
+# }}}
 
+# {{{ SplitMeta
 class SplitMeta(object):
     """PKGBUILD metadata that can be overridden per split package"""
     # Actually, just the split metadata this script cares about
@@ -451,9 +482,9 @@ class SplitMeta(object):
         self.suffix = suffix if self.suffix is None else self.suffix
 
 
-def build_meta(python, pkgname, py2_pkgname, py3_depends, py2_depends):
+def build_split(python, pkgname, py2_pkgname, py3_depends, py2_depends):
     """
-    Build the metadata dict out of the arguments
+    Build the split metadata dict out of the arguments
 
     If any python's metadata is given, check that python is indeed configured
     (either by -p PYTHON or by -p multi)
@@ -487,11 +518,14 @@ def build_meta(python, pkgname, py2_pkgname, py3_depends, py2_depends):
                               'py2_depends': py2_depends}))
 
     return meta
+#}}}
 
-
+# {{{ Maintainer
 Maintainer = namedtuple('Maintainer', ['name', 'email'])
 Maintainer.__doc__ = """Representation of maintainer metadata"""
+# }}}
 
+# {{{ Pkgbuild
 class Pkgbuild(object):
     """
     Representation of a PKGBUILD
@@ -641,34 +675,9 @@ class Pkgbuild(object):
     def generate(self):
         """Generate the PKGBUILD functions from the various steps"""
         return '\n'.join(self.__steps())
+# }}}
 
-
-def fetch_pymodule(name, version):
-    """
-    :type name: str
-    :type version: str
-    :rtype: dict
-    """
-    def fetch_json(url):
-        return json.loads(urlopen(url).read().decode('utf-8'))
-
-    try:
-        url = MODULE_JSON.format(name=name)
-        info = fetch_json(url)
-        if version:
-            if info['releases'].get(version) is None:
-                raise PythonModuleVersionNotFoundError(
-                    '{} {}'.format(name, version))
-            url = VERSION_MODULE_JSON.format(name=name, version=version)
-            info = fetch_json(url)
-
-    except HTTPError as e:
-        if e.code == 404:
-            raise PythonModuleNotFoundError('{}'.format(name))
-        raise e
-    return info
-
-
+# {{{ parse_args
 def parse_args(argv):
     """
     Argument parsing logic
@@ -780,6 +789,7 @@ def parse_args(argv):
         sys.exit(1)
 
     return args
+#}}}
 
 
 def main(args=sys.argv):
@@ -787,7 +797,7 @@ def main(args=sys.argv):
 
     args = parse_args(args[1:])
 
-    meta = build_meta(**{key: vars(args)[key] for key in
+    split_meta = build_split(**{key: vars(args)[key] for key in
                          ['python', 'pkgname', 'py2_pkgname',
                           'py3_depends', 'py2_depends']})
 
@@ -827,7 +837,7 @@ def main(args=sys.argv):
                'pkgname'])
 
     maintainer = Maintainer(args.email, args.name)
-    pkgbuild = Pkgbuild(module, meta, maintainer, **opts).generate()
+    pkgbuild = Pkgbuild(module, split_meta, maintainer, **opts).generate()
 
     if args.print_out:
         sys.stdout.write(pkgbuild)
