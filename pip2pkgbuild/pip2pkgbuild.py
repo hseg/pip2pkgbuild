@@ -9,6 +9,7 @@ Generate PKGBUILD file for a Python module from PyPI
 from __future__ import unicode_literals
 
 import argparse
+from collections import namedtuple
 import fileinput
 import json
 import logging
@@ -192,7 +193,18 @@ def removesuffix(s, suffix):
     return s
 # }}}
 
+
 # {{{ fetch_pypi
+def get_pypiquery(module, module_version):
+    """
+    Query parameters for the PyPI lookup
+
+    :type module: str
+    :type module_version: num
+    """
+    return {'name': module, 'version': module_version}
+
+
 def fetch_pypi(name, version):
     """
     :type name: str
@@ -227,7 +239,43 @@ class PythonModuleVersionNotFoundError(Exception):
     """Thrown when the specified module version can't be found on PyPI"""
 # }}}
 
+
+# {{{ PEP517
+def get_pep517(pep517, python):
+    """
+    Default to PEP517 if python 3 requested or running with a python 3
+    interpreter
+
+    Check PEP517 is not requested if a python 2 package (standalone or split)
+    is requested
+
+    :type pep517: Bool
+    :type python: str
+    """
+
+    if pep517 is None:
+        if IS_PY2 or python == 'multi' or python == 'python2':
+            pep517 = False
+        elif not IS_PY2 or python == 'python3':
+            pep517 = True
+
+    if pep517 and (
+        (python is None and IS_PY2)
+        or python == 'multi' or python == 'python2'
+    ):
+        LOG.error('PEP517 based installation supports Python 3 packages only.')
+        sys.exit(1)
+
+    return pep517
+# }}}
+
+
 # {{{ PyModule
+def get_licensequery(find_license):
+    """Look up license in source archive"""
+    return find_license
+
+
 class PyModule(object):
     """
     Metadata for a python module
@@ -255,107 +303,11 @@ class PyModule(object):
                 src_info.get('digests', {}), 'sha256', '')
             self.license_path = None
             if find_license:
-                compressed_source = self.__download_source(self.source)
-                self.license_path = self.__find_license_path(compressed_source)
+                with self.__get_archive(self.source) as file:
+                    with Archive.archive_type(self.source)(file) as archive:
+                        self.license_path = self.__find_license_path(archive)
         except KeyError as e:
             raise ParseModuleInfoError(e)
-
-    @staticmethod
-    def __download_source(url):
-        """Download compressed file at `url` into a compressed object.
-
-        The url should contain the source of the python module.
-        :type url: str
-        :rtype: Archive|None
-        """
-        if not url:
-            LOG.warning('Given url was empty')
-            return None
-        # Check to see if the file is a tarfile.
-        # Unfortunately, splitext only works for files
-        # with single extensions
-        filename = os.path.basename(url)
-
-        def __get_archive():
-            try:
-                return urlopen(url)
-            except HTTPError as e:
-                LOG.error('Could not retrieve python package for '
-                          'license inspection from %s with error %s', url, e)
-                return None
-
-        # tar.gz and tar.bz
-        if re.match('.*\\.tar\\.(?:gz|bz2)', filename, re.I):
-            # The mode needs to be 'r|*', (any type of tarball) which
-            # tells tarfile that It should not attempt to
-            # seek() or tell() the given
-            # object since HTTPResponse doesn't support those operations
-            return TarArchive(__get_archive())
-        # zip
-        elif filename.lower().endswith('.zip'):
-            return ZipArchive(__get_archive())
-        else:
-            LOG.warning("Source url('%s') "
-                        'did not have a zip or tar extension', url)
-            return None
-
-    @staticmethod
-    def __search_compressed_file(compressed_source, match):
-        """Shallow depth first sarching in compressed file
-
-        :type compressed_source: Archive
-        :type match: str -> T|None
-        :rtype: T|None
-        """
-        if compressed_source is None:
-            return None
-        files = compressed_source.get_file_listing()
-
-        def depth(path):
-            """Depth of a file path.
-
-            :type path: str
-            :rtype: int
-            """
-            return path.count('/')
-
-        # Prefer matches closer to the root
-        sorted_files = sorted(files, key=depth)
-        for file_path in sorted_files:
-            matched = match(file_path)
-            if matched:
-                return matched
-        return None
-
-    def __find_license_path(self, compressed_source):
-        """Determine whether the package source contains a physical license.
-
-        :type compressed_source: Archive
-        :rtype: bool|None
-        """
-        # LICENSE
-        # LICENSE.txt
-        # license.txt
-        # LICENSES.txt
-        # license
-        find_license = re.compile('.*/LICENSES?(?:\\.(txt|rst|md)|)$')
-
-        def match_license(file_path):
-            """
-            :type file_path: str
-            :rtype: str|None
-            """
-            match = find_license.match(file_path, re.I)
-            if match:
-                # Remove the subfolder file_path from the match
-                # Note: path separators inside a zipfile are always '/'
-                return ''.join(match.group(0).split('/')[1:])
-            return None
-
-        match = self.__search_compressed_file(compressed_source, match_license)
-        if match is None:
-            LOG.warning('Could not find license file.')
-        return match
 
     # https://wiki.archlinux.org/index.php/PKGBUILD#license
     @staticmethod
@@ -411,15 +363,59 @@ class PyModule(object):
             info = urls[0]
         return info
 
-    def __get_source(self, url):
+    @staticmethod
+    def __get_archive(url):
+        """Download the archive of the python module"""
+
+        try:
+            return urlopen(url)
+        except HTTPError as e:
+            LOG.error('Could not retrieve python package for '
+                      'license inspection from %s with error %s', url, e)
+            return None
+
+    @staticmethod
+    def __find_license_path(archive):
+        """Determine whether the package source contains a physical license.
+
+        :type archive: Archive
+        :rtype: bool|None
         """
-        :type url: str
-        :rtype: str
-        """
-        ext = url.split(self.pkgver)[-1]
-        return '${_module}-${pkgver}' + ext + '::' + url
+        # LICENSE
+        # LICENSE.txt
+        # license.txt
+        # LICENSES.txt
+        # license
+        if archive is None:
+            LOG.warning('Could not find source archive')
+            return None
+
+        find_license = re.compile('.*/LICENSES?(?:\\.(txt|rst|md)|)$')
+
+        def match_license(file_path):
+            """
+            :type file_path: str
+            :rtype: str|None
+            """
+            match = find_license.match(file_path, re.I)
+            if match:
+                # Remove the subfolder file_path from the match
+                # Note: path separators inside a zipfile are always '/'
+                return ''.join(match.group(0).split('/')[1:])
+            return None
+
+        match = archive.search_compressed_file(match_license)
+        if match is None:
+            LOG.warning('Could not find license file.')
+        return match
 
 
+class ParseModuleInfoError(Exception):
+    """Thrown when the PyPI response is malformed"""
+# }}}
+
+
+# {{{ Archives
 class Archive(object):
     """Interface for archive objects (like zip and tar files)"""
 
@@ -431,147 +427,160 @@ class Archive(object):
 
         :rtype: list[str]
         """
+        raise NotImplementedError("Archive is an interface")
+
+    def search_compressed_file(self, match):
+        """Shallow depth first sarching in compressed file
+
+        :type compressed_source: Archive
+        :type match: str -> T|None
+        :rtype: T|None
+        """
+        files = self.get_file_listing()
+
+        def depth(path):
+            """Depth of a file path.
+
+            :type path: str
+            :rtype: int
+            """
+            return path.count('/')
+
+        # Prefer matches closer to the root
+        sorted_files = sorted(files, key=depth)
+        for file_path in sorted_files:
+            matched = match(file_path)
+            if matched:
+                return matched
+        return None
+
+    @staticmethod
+    def archive_type(url):
+        """
+        Get the type of the archive returned by url
+
+        :type url: str
+        :rtype: type
+        """
+        if not url:
+            LOG.warning('Given url was empty')
+            return None
+        # Check to see if the file is a tarfile.
+        # Unfortunately, splitext only works for files
+        # with single extensions
+        filename = os.path.basename(url)
+
+        # tar.gz and tar.bz
+        if re.match('.*\\.tar\\.(?:gz|bz2)', filename, re.I):
+            # The mode needs to be 'r|*', (any type of tarball) which
+            # tells tarfile that It should not attempt to
+            # seek() or tell() the given
+            # object since HTTPResponse doesn't support those operations
+            return TarArchive
+        # zip
+        elif filename.lower().endswith('.zip'):
+            return ZipArchive
+        else:
+            LOG.warning("Source url('%s') "
+                        'did not have a zip or tar extension', url)
+            return None
 
 
 class TarArchive(Archive):
     """Tar archive, providing access to its toplevel files"""
 
     def __init__(self, file):
-        self.archive = tarfile.open(fileobj=file, mode='r|*')
+        self.file = file
+        self.archive = None
 
     def get_file_listing(self):
         return [tar_info.name for
                 tar_info in self.archive.getmembers() if not tar_info.isdir()]
+
+    def __enter__(self):
+        self.archive = tarfile.open(fileobj=self.file, mode='r|*')
+        self.archive.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self.archive.__exit__(*args)
 
 
 class ZipArchive(Archive):
     """Zip archive, providing access to all its files"""
 
     def __init__(self, file):
-        self.file = zipfile.ZipFile(BytesIO(file.read()))
+        self.file = file
+        self.archive = None
 
     def get_file_listing(self):
         # Remove directories from list
         return [name for
-                name in self.file.namelist() if not name.endswith('/')]
+                name in self.archive.namelist() if not name.endswith('/')]
 
-class ParseModuleInfoError(Exception):
-    """Thrown when the PyPI response is malformed"""
+    def __enter__(self):
+        self.archive = zipfile.ZipFile(BytesIO(self.file.read()))
+        self.archive.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self.archive.__exit__(*args)
 # }}}
+
 
 # {{{ SplitMeta
+SplitPkg = namedtuple('SplitPkg', ['pkgname', 'depends', 'suffix'])
+SplitPkg.__doc__ = """Split PKGBUILD metadata for a single package"""
+# Actually, just the split metadata this script cares about
+
+
 class SplitMeta(object):
-    """PKGBUILD metadata that can be overridden per split package"""
-    # Actually, just the split metadata this script cares about
+    """Collection of the splits in this PKGBUILD"""
 
-    def __init__(self, pkgname=None, depends=None, suffix=''):
-        self.pkgname = pkgname
-        self.depends = depends if depends is not None else []
-        self.suffix = suffix
-
-    def update(self, pkgname=None, depends=None, suffix=None):
+    def __init__(self, python, pkgname, py2_pkgname, py3_depends, py2_depends):
         """
-        Merge with another set of metadata
+        Build the split metadata dict out of the arguments
 
-        Semantics are:
-        - pkgname, suffix take first defined value
-        - depends concatenates
+        If any python's metadata is given, check that python is indeed
+        configured (either by -p PYTHON or by -p multi)
         """
-        self.pkgname = pkgname if self.pkgname is None else self.pkgname
-        self.depends += depends
-        self.suffix = suffix if self.suffix is None else self.suffix
 
+        def split(python, name, deps, is_split, is_default):
+            return SplitPkg(
+                pkgname=name if name is not None else '%s-%s' % (python, name),
+                depends=([python] if is_split else []) + ([] if deps is None
+                                                          else deps),
+                suffix=('-%s' if is_split and not is_default else '')
+            )
 
-def build_split(python, pkgname, py2_pkgname, py3_depends, py2_depends):
-    """
-    Build the split metadata dict out of the arguments
+        self.splits = {}
+        if python in {'python', 'multi'}:
+            self.splits[python] = split('python',
+                                        pkgname,
+                                        py3_depends,
+                                        python == 'multi',
+                                        True)
+        if python in {'python2', 'multi'}:
+            self.splits[python] = split('python2',
+                                        py2_pkgname,
+                                        py2_depends,
+                                        python == 'multi',
+                                        False)
 
-    If any python's metadata is given, check that python is indeed configured
-    (either by -p PYTHON or by -p multi)
-    """
-
-    meta = {}
-    if python in {'python', 'multi'}:
-        meta['python'] = SplitMeta(
-            pkgname=pkgname,
-            depends=py3_depends,
-            suffix=''
-        )
-    if python in {'python2', 'multi'}:
-        meta['python2'] = SplitMeta(
-            pkgname=py2_pkgname,
-            depends=py2_depends,
-            suffix='-python2' if python == 'multi' else ''
-        )
-
-    if (any(v is not None for v in [pkgname, py3_depends]) and
-            'python' not in meta):
-        raise ValueError(('Python 3 package metadata passed: %s\n' +
-                         'But requested only Python 2 package to be built!') %
-                         str({'pkgname': pkgname,
-                              'py3_depends': py3_depends}))
-    if (any(v is not None for v in [py2_pkgname, py2_depends]) and
-            'python2' not in meta):
-        raise ValueError(('Python 2 package metadata passed: %s\n' +
-                         'But requested only Python 3 package to be built!') %
-                         str({'py2_pkgname': py2_pkgname,
-                              'py2_depends': py2_depends}))
-
-    return meta
-#}}}
-
-# {{{ Maintainer
-Maintainer = namedtuple('Maintainer', ['name', 'email'])
-Maintainer.__doc__ = """Representation of maintainer metadata"""
-# }}}
-
-# {{{ Pkgbuild
-class Pkgbuild(object):
-    """
-    Representation of a PKGBUILD
-
-    Encapsulates the metadata-to-PKGBUILD logic
-    """
-
-    def __init__(self, module, meta, maintainer=None,
-                 mkdepends=None, backend=None, depends=None,
-                 pkgbase=None, pep517=False):
-        """
-        :type module: PyModule
-        :type python: str
-        :type meta: dict[str, SplitMeta]
-        :type maintainer: Maintainer
-        :type mkdepends: list[str]
-        :type backend: str
-        :type depends: list[str]
-        :type pkgbase: str
-        :type pep517: Bool
-        """
-        self.module = module
-        self.maintainer = maintainer
-        self.pep517 = pep517
-
-        self.splits = meta
-        self.depends = []
-        self.mkdepends = []
-
-        if self.is_split:
-            for py in self.splits:
-                self.splits[py].update(
-                    pkgname='%s-%s' % (py, module.name),
-                    depends=[py])
-        else:
-            self.depends += self.python_vers
-
-        self.depends += depends
-        self.mkdepends += self.__get_mkdepends(backend)
-        self.mkdepends += mkdepends if mkdepends is not None else []
-
-        self.pkgbase = (
-            pkgbase if pkgbase is not None
-            else self.pkgname[0] if not self.is_split
-            else self.splits['python'].pkgname
-        )
+        if (any(v is not None for v in [pkgname, py3_depends]) and
+                'python' not in self.splits):
+            raise ValueError(
+                ('Python 3 package metadata passed: %s\n' +
+                 'But requested only Python 2 package to be built!') %
+                str({'pkgname': pkgname,
+                     'py3_depends': py3_depends}))
+        if (any(v is not None for v in [py2_pkgname, py2_depends]) and
+                'python2' not in self.splits):
+            raise ValueError(
+                ('Python 2 package metadata passed: %s\n' +
+                 'But requested only Python 3 package to be built!') %
+                str({'py2_pkgname': py2_pkgname,
+                     'py2_depends': py2_depends}))
 
     @property
     def is_split(self):
@@ -586,12 +595,64 @@ class Pkgbuild(object):
         return self.splits.keys()
 
     @property
-    def pkgname(self):
+    def pkgnames(self):
         """Per-python pkgname"""
 
         return [m.pkgname for m in self.splits.values()]
+# }}}
 
-    def __get_mkdepends(self, backend):
+
+# {{{ Maintainer
+Maintainer = namedtuple('Maintainer', ['name', 'email'])
+Maintainer.__doc__ = """Representation of maintainer metadata"""
+
+
+def get_maintainer(name, email):
+    """Maintainer line must have either both email and name or neither"""
+
+    if bool(email) != bool(name):
+        LOG.error('Must supply either both email and name or neither.')
+        sys.exit(1)
+    return Maintainer(**locals())
+# }}}
+
+
+# {{{ SharedMeta
+class SharedMeta(object):
+    """Shared pkgbuild metadata"""
+
+    def __init__(self, mkdepends, backend, depends, pkgbase):
+        self.mkdepends = [] if mkdepends is None else mkdepends
+        self.depends = [] if depends is None else depends
+        self.backend = backend
+        self.pkgbase = pkgbase
+
+    def infer(self, splits, pep517):
+        """
+        Infer the additional metadata
+
+        - pkgbase: if unset, take the unique pkgname if the package is unsplit,
+          or the python3 pkgname if the package is split
+        - depends: If unsplit, add the python version used. Otherwise, the
+          python version will be a per-split dependency
+        - mkdepends: Add the backend, and if using PEP517, its infrastructure
+          packages
+        """
+
+        if not splits.is_split:
+            self.depends = splits.python_vers + self.depends
+
+        self.mkdepends = (
+            self.__backend_mkdepends(splits, pep517) + self.mkdepends
+        )
+
+        self.pkgbase = (
+            self.pkgbase if self.pkgbase is not None
+            else splits.pkgnames[0] if not splits.is_split
+            else splits['python'].pkgname
+        )
+
+    def __backend_mkdepends(self, splits, pep517):
         """
         Expand the makedepends given -- get the package corresponding to the
         build backend, list the pep517 packages if requested.
@@ -599,11 +660,45 @@ class Pkgbuild(object):
         :param str backend: The build backend used by the module
         """
 
-        modules = [backend]
+        modules = [self.backend]
         # Archwiki: [Python_package_guidelines#Standards_based_(PEP_517)]
-        if self.pep517:
+        if pep517:
             modules += ['build', 'installer', 'wheel']
-        return ['%s-%s' % (v, m) for m in modules for v in self.python_vers]
+        return ['%s-%s' % (v, m) for m in modules for v in splits.python_vers]
+# }}}
+
+
+# {{{ Pkgbuild
+class Pkgbuild(object):
+    """
+    Representation of a PKGBUILD
+
+    Encapsulates the metadata-to-PKGBUILD logic
+    """
+
+    def __init__(self, module, splitmeta, maintainer=None, sharedmeta=None,
+                 pep517=False):
+        """
+        :type module: PyModule
+        :type python: str
+        :type splitmeta: SplitMeta
+        :type maintainer: Maintainer
+        :type sharedmeta: SharedMeta
+        :type pep517: Bool
+        """
+        self.module = module
+        self.splitmeta = splitmeta
+        self.maintainer = maintainer
+        self.sharedmeta = sharedmeta
+        self.pep517 = pep517
+
+        self.sharedmeta.infer(self.splitmeta, self.pep517)
+
+    @property
+    def is_split(self):
+        """Is this package split? Is it configured for multiple pythons?"""
+
+        return self.splitmeta.is_split
 
     def __steps(self):
         """"
@@ -620,11 +715,13 @@ class Pkgbuild(object):
 
         if self.is_split:
             yield SPLIT_NAME.format(
-                pkgbase=self.pkgbase,
-                pkgname=iter_to_str(self.pkgname)
+                pkgbase=self.sharedmeta.pkgbase,
+                pkgname=iter_to_str(self.splitmeta.pkgnames)
             )
         else:
-            yield SINGLE_NAME.format(pkgname=iter_to_str(self.pkgname))
+            yield SINGLE_NAME.format(
+                pkgname=iter_to_str(self.splitmeta.pkgnames)
+            )
 
         yield HEADERS.format(
             module=self.module.module,
@@ -632,8 +729,8 @@ class Pkgbuild(object):
             pkgver=self.module.pkgver,
             pkgdesc=self.module.pkgdesc,
             url=self.module.url,
-            depends=iter_to_str(self.depends),
-            mkdepends=iter_to_str(self.mkdepends),
+            depends=iter_to_str(self.sharedmeta.depends),
+            mkdepends=iter_to_str(self.sharedmeta.mkdepends),
             license=self.module.license,
             source=self.module.source,
             checksums=self.module.checksums
@@ -646,7 +743,7 @@ class Pkgbuild(object):
 
         yield BUILD_FUNC.format(statements='\n\n'.join(
             build.format(suffix=meta.suffix, python=py)
-            for (py, meta) in self.splits.items())
+            for (py, meta) in self.splitmeta.items())
         )
 
         install = INSTALL_STATEMENT if self.pep517 else INSTALL_STATEMENT_OLD
@@ -659,7 +756,7 @@ class Pkgbuild(object):
         else:
             license_command = ''
 
-        for (py, meta) in self.splits.items():
+        for (py, meta) in self.splitmeta.items():
             yield PACKAGE_FUNC.format(
                 sub_pkgname=('_'+meta.pkgname) if self.is_split else '',
                 dependencies=SUBPKG_DEPENDS.format(
@@ -676,6 +773,7 @@ class Pkgbuild(object):
         """Generate the PKGBUILD functions from the various steps"""
         return '\n'.join(self.__steps())
 # }}}
+
 
 # {{{ parse_args
 def parse_args(argv):
@@ -769,27 +867,29 @@ def parse_args(argv):
         default=None,
         help='Use old-style installation method unconditionally')
 
-    args = argparser.parse_args(argv)
+    return argparser.parse_args(argv)
 
-    if bool(args.email) != bool(args.name):
-        LOG.error('Must supply either both email and name or neither.')
-        sys.exit(1)
 
-    if args.pep517 is None:
-        if IS_PY2 or args.python == 'multi' or args.python == 'python2':
-            args.pep517 = False
-        elif not IS_PY2 or args.python == 'python3':
-            args.pep517 = True
+def split_args(args, get):
+    """
+    Construct the variables defined by `splits` out of `args`
 
-    if args.pep517 and (
-        (args.python is None and IS_PY2)
-        or args.python == 'multi' or args.python == 'python2'
-    ):
-        LOG.error('PEP517 based installation supports Python 3 packages only.')
-        sys.exit(1)
+    :type args: argparse.Namespace
+    :param function get: A function validating and extracting useful data from
+                         the arguments. Its parameters should be named as the
+                         arguments to be extracted.
+                         __init__ can also be passed, and its `self` argument
+                         will be skipped.
+    """
 
-    return args
-#}}}
+    return get(**{key: vars(args)[key] for key in get.__code__.co_varnames
+                  if key != 'self'})
+# }}}
+
+
+def get_execoptions(print_out):
+    """Options for controlling the program execution"""
+    return {'print_out': print_out}
 
 
 def main(args=sys.argv):
@@ -797,13 +897,11 @@ def main(args=sys.argv):
 
     args = parse_args(args[1:])
 
-    split_meta = build_split(**{key: vars(args)[key] for key in
-                         ['python', 'pkgname', 'py2_pkgname',
-                          'py3_depends', 'py2_depends']})
+    pep517 = split_args(args, get_pep517)
 
     try:
-        module = PyModule(fetch_pypi(args.module, args.module_version),
-                          args.find_license)
+        module = PyModule(fetch_pypi(**split_args(args, get_pypiquery)),
+                          split_args(args, get_licensequery))
     except PythonModuleNotFoundError as e:
         LOG.error('Python module not found: %s', e)
         sys.exit(0)
@@ -814,30 +912,12 @@ def main(args=sys.argv):
         LOG.error('Failed to parse Python module information: %s', e)
         sys.exit(0)
 
-    def filter_options(args, deletes):
-        """
-        :type args: argparse.Namespace
-        :type deletes: list[str]
-        :rtype: dict
-        """
-        opts = dict(vars(args))
-        for k in deletes:
-            del opts[k]
-        return opts
 
-    opts = filter_options(
-        args, ['module',
-               'module_version',
-               'print_out',
-               'find_license',
-               'python',
-               'py2_depends',
-               'py3_depends',
-               'py2_pkgname',
-               'pkgname'])
-
-    maintainer = Maintainer(args.email, args.name)
-    pkgbuild = Pkgbuild(module, split_meta, maintainer, **opts).generate()
+    splitmeta = split_args(args, SplitMeta.__init__)
+    maintainer = split_args(args, get_maintainer)
+    sharedmeta = split_args(args, SharedMeta.__init__)
+    pkgbuild = Pkgbuild(module, splitmeta, maintainer,
+                        sharedmeta, pep517).generate()
 
     if args.print_out:
         sys.stdout.write(pkgbuild)
